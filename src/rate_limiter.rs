@@ -12,7 +12,7 @@ struct Entry { count: u32, window_start: u64 }
 
 static COUNTER: Lazy<Mutex<HashMap<String, Entry>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
-pub fn init() { let _ = COUNTER.lock(); }
+pub fn init() { drop(COUNTER.lock()); }
 
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
