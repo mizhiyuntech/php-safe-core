@@ -4,30 +4,25 @@
 mod rc_guard;
 mod hooks;
 mod stats;
-mod cmd_guard;
-mod file_guard;
-mod rate_limiter;
-mod sensitive_guard;
+mod security;
 
-use libc::{c_void, size_t, c_char, c_int};
+use libc::{c_void, size_t};
 
 const BANNER: &str = "
     _~^~^~_
-\\) /  o o  \\ (/      php-safe-core v0.2.0
+\\) /  o o  \\ (/      php-safe-core v0.3.0
   '_   -   _'        > RC Guard         [ACTIVE]
-  / '-----' \\        > CMD Injection     [ACTIVE]
-                     > File Monitor     [ACTIVE]
-  Powered by Rust    > Rate Limiter     [ACTIVE]
-                     > Sensitive Guard  [ACTIVE]
+  / '-----' \\        > Security Monitor [ACTIVE]
+                     > Rate Limiter     [ACTIVE]
+  Powered by Rust    > Sensitive Guard  [ACTIVE]
 ";
 
 #[no_mangle]
 pub extern "C" fn php_safe_core_init() {
     stats::init();
-    rate_limiter::init();
+    security::init();
     eprintln!("{}", BANNER);
-    eprintln!("[php-safe-core] Security processor started successfully.");
-    eprintln!("[php-safe-core] PHP process is now protected.");
+    eprintln!("[php-safe-core] Security processor started. PHP process is protected.");
     eprintln!("[php-safe-core] ------------------------------------------");
 }
 
@@ -37,12 +32,12 @@ pub extern "C" fn php_safe_core_shutdown() {
     eprintln!("[php-safe-core] ------------------------------------------");
     eprintln!("[php-safe-core] Runtime Statistics:");
     eprintln!("[php-safe-core]   RC Intercepts   : {}", s.rc_intercepts);
-    eprintln!("[php-safe-core]   CMD Blocks      : {}", s.cmd_blocks);
-    eprintln!("[php-safe-core]   File Blocks     : {}", s.file_blocks);
+    eprintln!("[php-safe-core]   Threats Blocked : {}", s.threats_blocked);
     eprintln!("[php-safe-core]   Rate Blocks     : {}", s.rate_blocks);
-    eprintln!("[php-safe-core]   Sensitive Blocks: {}", s.sensitive_blocks);
     eprintln!("[php-safe-core] Shutdown complete.");
 }
+
+// ── RC 钩子（供 PHP FFI 调用）──────────────────────────────
 
 #[no_mangle]
 pub extern "C" fn php_safe_rc_addref(refcount: *mut u32) -> u32 {
@@ -54,33 +49,35 @@ pub extern "C" fn php_safe_rc_delref(refcount: *mut u32, ptr: *mut c_void) -> u3
     rc_guard::delref(refcount, ptr)
 }
 
+// ── 安全检查接口（供 PHP FFI 主动调用）────────────────────
+
+/// 检查命令是否被允许执行（0=允许 1=拦截）
 #[no_mangle]
-pub unsafe extern "C" fn execve(
-    path: *const c_char,
-    argv: *const *const c_char,
-    envp: *const *const c_char,
-) -> c_int {
-    cmd_guard::intercept_execve(path, argv, envp)
+pub unsafe extern "C" fn php_safe_check_cmd(cmd: *const libc::c_char) -> libc::c_int {
+    security::check_cmd(cmd)
 }
 
+/// 检查文件路径是否允许访问（0=允许 1=拦截）
 #[no_mangle]
-pub unsafe extern "C" fn popen(command: *const c_char, mode: *const c_char) -> *mut libc::FILE {
-    cmd_guard::intercept_popen(command, mode)
+pub unsafe extern "C" fn php_safe_check_path(path: *const libc::c_char) -> libc::c_int {
+    security::check_path(path)
 }
 
+/// 检查 IP 是否超过频率限制（0=允许 1=拦截）
 #[no_mangle]
-pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: u32) -> c_int {
-    file_guard::intercept_open(path, flags, mode)
+pub unsafe extern "C" fn php_safe_rate_check(ip: *const libc::c_char) -> libc::c_int {
+    security::rate_check(ip)
 }
 
+/// 过滤敏感输出内容，返回是否被过滤（0=正常 1=已过滤）
 #[no_mangle]
-pub unsafe extern "C" fn write(
-    fd: libc::c_int,
-    buf: *const c_void,
-    count: size_t,
-) -> libc::ssize_t {
-    sensitive_guard::intercept_write(fd, buf, count)
+pub unsafe extern "C" fn php_safe_filter_output(
+    buf: *const libc::c_char,
+) -> libc::c_int {
+    security::filter_output(buf)
 }
+
+// ── 统计接口 ───────────────────────────────────────────────
 
 #[no_mangle]
 pub unsafe extern "C" fn php_safe_stats_json(buf: *mut u8, buf_len: size_t) -> size_t {
