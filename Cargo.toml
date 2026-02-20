@@ -1,9 +1,8 @@
 [package]
 name = "php-safe-core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-description = "PHP底层安全处理器 - 修复RC漏洞并提升PHP运行性能"
-authors = ["php-safe-core contributors"]
+description = "PHP底层安全处理器 - 修复RC漏洞"
 license = "MIT"
 
 [lib]
@@ -13,8 +12,6 @@ crate-type = ["cdylib"]
 [dependencies]
 libc = "0.2"
 once_cell = "1.19"
-dashmap = "5.5"
-parking_lot = "0.12"
 
 [profile.release]
 opt-level = 3

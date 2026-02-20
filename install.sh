@@ -5,7 +5,7 @@
 # WARNING: Test environment only.
 # ============================================================
 
-set -e
+# errors handled manually, no set -e
 
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
@@ -75,8 +75,8 @@ echo -e "${GREEN}[OK] Installed: $SO_TARGET${NC}"
 # ── Verify .so loads with PHP ──────────────────────────────
 echo ""
 echo -e "${CYAN}[*] Verifying .so loads correctly ...${NC}"
-LOAD_TEST=$(LD_PRELOAD="$SO_TARGET" php -r 'echo "php-safe-core-ok";' 2>&1)
-if echo "$LOAD_TEST" | grep -q "php-safe-core-ok"; then
+LOAD_TEST=$(LD_PRELOAD="$SO_TARGET" php -r 'echo "php-safe-core-ok";' 2>&1) || true
+if echo "$LOAD_TEST" | grep -q "php-safe-core-ok" 2>/dev/null; then
     echo -e "${GREEN}[OK] .so verified: PHP loads it successfully.${NC}"
     VERIFIED=1
 else
