@@ -30,17 +30,14 @@ pub unsafe fn intercept_write(fd: c_int, buf: *const c_void, count: size_t) -> s
     if buf.is_null() || count == 0 {
         return call_real_write(fd, buf, count);
     }
-
     let slice = std::slice::from_raw_parts(buf as *const u8, count);
     let content = String::from_utf8_lossy(slice);
-
     for pattern in SENSITIVE_PATTERNS {
         if content.contains(pattern) {
             stats::inc_sensitive_block();
             return call_real_write(fd, SAFE_MSG.as_ptr() as *const c_void, SAFE_MSG.len());
         }
     }
-
     call_real_write(fd, buf, count)
 }
 
