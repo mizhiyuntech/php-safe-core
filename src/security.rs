@@ -1,6 +1,4 @@
-//! Unified security module
-//! Provides safe check functions callable via PHP FFI.
-//! Does NOT hook any syscalls to avoid segfault.
+//! Unified security module using internal memory pool for all allocations.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -9,8 +7,7 @@ use once_cell::sync::Lazy;
 use libc::c_char;
 use std::ffi::CStr;
 use crate::stats;
-
-// ── Rate limiter state ─────────────────────────────────────
+use crate::mem_pool::POOL;
 
 const WINDOW_SECS: u64 = 60;
 const MAX_REQUESTS: u32 = 300;
@@ -20,8 +17,6 @@ struct RateEntry { count: u32, window_start: u64 }
 
 static RATE_MAP: Lazy<Mutex<HashMap<String, RateEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
-
-// ── Blocklists ─────────────────────────────────────────────
 
 const BLOCKED_CMDS: &[&str] = &[
     "curl", "wget", "nc", "ncat", "netcat",
@@ -47,13 +42,15 @@ const SENSITIVE_PATTERNS: &[&str] = &[
 
 pub fn init() {
     drop(RATE_MAP.lock());
+    // Warm up the memory pool
+    let ptrs: Vec<*mut u8> = (0..32).map(|_| POOL.alloc(64)).collect();
+    for ptr in ptrs { POOL.free(ptr, 64); }
 }
 
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-/// Check if a shell command should be blocked
 pub unsafe fn check_cmd(cmd: *const c_char) -> libc::c_int {
     if cmd.is_null() { return 0; }
     let s = CStr::from_ptr(cmd).to_string_lossy().to_lowercase();
@@ -67,7 +64,6 @@ pub unsafe fn check_cmd(cmd: *const c_char) -> libc::c_int {
     0
 }
 
-/// Check if a file path should be blocked
 pub unsafe fn check_path(path: *const c_char) -> libc::c_int {
     if path.is_null() { return 0; }
     let s = CStr::from_ptr(path).to_string_lossy();
@@ -88,7 +84,6 @@ pub unsafe fn check_path(path: *const c_char) -> libc::c_int {
     0
 }
 
-/// Rate limit check by IP string
 pub unsafe fn rate_check(ip: *const c_char) -> libc::c_int {
     if ip.is_null() { return 0; }
     let ip_str = CStr::from_ptr(ip).to_string_lossy().to_string();
@@ -104,13 +99,12 @@ pub unsafe fn rate_check(ip: *const c_char) -> libc::c_int {
     entry.count += 1;
     if entry.count > MAX_REQUESTS {
         stats::inc_rate_block();
-        eprintln!("[php-safe-core] [RATE] Blocked IP: {} ({}/{}s)", ip_str, entry.count, WINDOW_SECS);
+        eprintln!("[php-safe-core] [RATE] Blocked: {} ({}/{}s)", ip_str, entry.count, WINDOW_SECS);
         return 1;
     }
     0
 }
 
-/// Filter sensitive output content
 pub unsafe fn filter_output(buf: *const c_char) -> libc::c_int {
     if buf.is_null() { return 0; }
     let s = CStr::from_ptr(buf).to_string_lossy();

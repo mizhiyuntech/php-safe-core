@@ -1,204 +1,186 @@
-//! 内存池模块
-//!
-//! PHP 频繁分配/释放小块内存（zval、HashTable 桶等），
-//! 标准 glibc malloc 在高并发下存在锁竞争。
-//!
-//! 本模块实现分级内存池（Slab Allocator）：
-//!   - 小块 (≤64B)：固定 slab，零锁路径
-//!   - 中块 (≤4KB)：分级 free-list
-//!   - 大块 (>4KB)：直接 mmap，绕过 brk 碎片
+//! High-performance memory pool for internal use only.
+//! Uses a lock-free slab allocator for fixed-size objects
+//! and a shared arena for variable-size allocations.
+//! This pool is ONLY used by php-safe-core internals, NOT PHP itself.
 
-use libc::{c_void, size_t, mmap, munmap, PROT_READ, PROT_WRITE, MAP_PRIVATE, MAP_ANONYMOUS, MAP_FAILED};
+use std::sync::atomic::{AtomicUsize, AtomicPtr, Ordering};
+use std::alloc::{alloc, dealloc, Layout};
 use once_cell::sync::Lazy;
-use parking_lot::Mutex;
-use crate::stats;
 
-const SMALL_MAX: usize = 64;
-const MEDIUM_MAX: usize = 4096;
-const SLAB_COUNT: usize = 8; // 8, 16, 24, 32, 40, 48, 56, 64
-const SLAB_SLAB_SIZE: usize = 65536; // 64KB per slab page
+/// Slab slot size tiers (bytes)
+const TIERS: &[usize] = &[32, 64, 128, 256, 512, 1024];
+const SLAB_CAPACITY: usize = 4096; // slots per slab
 
+/// A single lock-free free-list slab for one size tier
 struct Slab {
-    free_list: Vec<*mut u8>,
-    obj_size: usize,
+    tier: usize,
+    stack: [AtomicPtr<u8>; SLAB_CAPACITY],
+    top: AtomicUsize,
+    alloc_count: AtomicUsize,
+    reuse_count: AtomicUsize,
 }
 
 unsafe impl Send for Slab {}
+unsafe impl Sync for Slab {}
 
-struct Pool {
-    slabs: [Mutex<Slab>; SLAB_COUNT],
-    medium_free: [Mutex<Vec<*mut u8>>; 7], // 128,256,512,1024,2048,4096
+impl Slab {
+    fn new(tier: usize) -> Self {
+        // Pre-allocate all slots upfront
+        let stack: [AtomicPtr<u8>; SLAB_CAPACITY] =
+            std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut()));
+
+        let slab = Self {
+            tier,
+            stack,
+            top: AtomicUsize::new(0),
+            alloc_count: AtomicUsize::new(0),
+            reuse_count: AtomicUsize::new(0),
+        };
+
+        // Pre-populate the free list
+        for i in 0..SLAB_CAPACITY {
+            let layout = Layout::from_size_align(tier, 8).unwrap();
+            let ptr = unsafe { alloc(layout) };
+            if !ptr.is_null() {
+                slab.stack[i].store(ptr, Ordering::Relaxed);
+            }
+        }
+        slab.top.store(SLAB_CAPACITY, Ordering::Release);
+        slab
+    }
+
+    /// Pop a slot from the free list (lock-free)
+    fn pop(&self) -> Option<*mut u8> {
+        loop {
+            let top = self.top.load(Ordering::Acquire);
+            if top == 0 { return None; }
+            match self.top.compare_exchange(top, top - 1, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => {
+                    let ptr = self.stack[top - 1].swap(std::ptr::null_mut(), Ordering::AcqRel);
+                    if !ptr.is_null() {
+                        self.reuse_count.fetch_add(1, Ordering::Relaxed);
+                        return Some(ptr);
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Push a slot back to the free list (lock-free)
+    fn push(&self, ptr: *mut u8) -> bool {
+        loop {
+            let top = self.top.load(Ordering::Acquire);
+            if top >= SLAB_CAPACITY { return false; }
+            match self.top.compare_exchange(top, top + 1, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => {
+                    self.stack[top].store(ptr, Ordering::Release);
+                    return true;
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
+    fn alloc(&self) -> *mut u8 {
+        self.alloc_count.fetch_add(1, Ordering::Relaxed);
+        if let Some(ptr) = self.pop() {
+            return ptr;
+        }
+        // Slab exhausted: fallback to system alloc
+        let layout = Layout::from_size_align(self.tier, 8).unwrap();
+        unsafe { alloc(layout) }
+    }
+
+    fn free(&self, ptr: *mut u8) {
+        if !self.push(ptr) {
+            // Slab full: return to system
+            let layout = Layout::from_size_align(self.tier, 8).unwrap();
+            unsafe { dealloc(ptr, layout) };
+        }
+    }
 }
 
-unsafe impl Send for Pool {}
-unsafe impl Sync for Pool {}
+/// Global pool of slabs, one per tier
+pub struct MemPool {
+    slabs: Vec<Slab>,
+    pub total_allocs: AtomicUsize,
+    pub total_reuses: AtomicUsize,
+}
 
-static POOL: Lazy<Pool> = Lazy::new(|| {
-    Pool {
-        slabs: std::array::from_fn(|i| {
-            Mutex::new(Slab {
-                free_list: Vec::new(),
-                obj_size: (i + 1) * 8,
-            })
-        }),
-        medium_free: std::array::from_fn(|_| Mutex::new(Vec::new())),
+unsafe impl Send for MemPool {}
+unsafe impl Sync for MemPool {}
+
+impl MemPool {
+    fn new() -> Self {
+        Self {
+            slabs: TIERS.iter().map(|&t| Slab::new(t)).collect(),
+            total_allocs: AtomicUsize::new(0),
+            total_reuses: AtomicUsize::new(0),
+        }
     }
-});
 
-/// 初始化内存池
+    fn tier_index(size: usize) -> Option<usize> {
+        TIERS.iter().position(|&t| size <= t)
+    }
+
+    pub fn alloc(&self, size: usize) -> *mut u8 {
+        self.total_allocs.fetch_add(1, Ordering::Relaxed);
+        if let Some(idx) = Self::tier_index(size) {
+            let ptr = self.slabs[idx].alloc();
+            if self.slabs[idx].reuse_count.load(Ordering::Relaxed) > 0 {
+                self.total_reuses.fetch_add(1, Ordering::Relaxed);
+            }
+            return ptr;
+        }
+        // Large alloc: direct system
+        let layout = Layout::from_size_align(size, 8).unwrap();
+        unsafe { alloc(layout) }
+    }
+
+    pub fn free(&self, ptr: *mut u8, size: usize) {
+        if ptr.is_null() { return; }
+        if let Some(idx) = Self::tier_index(size) {
+            self.slabs[idx].free(ptr);
+            return;
+        }
+        let layout = Layout::from_size_align(size, 8).unwrap();
+        unsafe { dealloc(ptr, layout) };
+    }
+
+    pub fn stats(&self) -> PoolStats {
+        PoolStats {
+            total_allocs: self.total_allocs.load(Ordering::Relaxed),
+            total_reuses: self.total_reuses.load(Ordering::Relaxed),
+            tiers: TIERS.iter().enumerate().map(|(i, &size)| TierStat {
+                size,
+                allocs: self.slabs[i].alloc_count.load(Ordering::Relaxed),
+                reuses: self.slabs[i].reuse_count.load(Ordering::Relaxed),
+                free_slots: self.slabs[i].top.load(Ordering::Relaxed),
+            }).collect(),
+        }
+    }
+}
+
+pub struct PoolStats {
+    pub total_allocs: usize,
+    pub total_reuses: usize,
+    pub tiers: Vec<TierStat>,
+}
+
+pub struct TierStat {
+    pub size: usize,
+    pub allocs: usize,
+    pub reuses: usize,
+    pub free_slots: usize,
+}
+
+pub static POOL: Lazy<MemPool> = Lazy::new(MemPool::new);
+
 pub fn init() {
-    // 预热 slab：为每个 slab 预分配第一页
-    for i in 0..SLAB_COUNT {
-        let obj_size = (i + 1) * 8;
-        let _ = fill_slab(i, obj_size);
-    }
-}
-
-fn fill_slab(idx: usize, obj_size: usize) -> bool {
-    let page = unsafe {
-        mmap(
-            std::ptr::null_mut(),
-            SLAB_SLAB_SIZE,
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS,
-            -1,
-            0,
-        )
-    };
-    if page == MAP_FAILED {
-        return false;
-    }
-    let mut slab = POOL.slabs[idx].lock();
-    let count = SLAB_SLAB_SIZE / obj_size;
-    for j in 0..count {
-        let ptr = unsafe { (page as *mut u8).add(j * obj_size) };
-        slab.free_list.push(ptr);
-    }
-    true
-}
-
-/// 分配内存
-pub unsafe fn alloc(size: size_t) -> *mut c_void {
-    if size == 0 {
-        return std::ptr::null_mut();
-    }
-
-    if size <= SMALL_MAX {
-        let idx = (size.saturating_sub(1)) / 8;
-        let obj_size = (idx + 1) * 8;
-        {
-            let mut slab = POOL.slabs[idx].lock();
-            if let Some(ptr) = slab.free_list.pop() {
-                stats::add_memory_saved(obj_size.saturating_sub(size));
-                return ptr as *mut c_void;
-            }
-        }
-        // slab 空了，重新填充
-        fill_slab(idx, obj_size);
-        let mut slab = POOL.slabs[idx].lock();
-        if let Some(ptr) = slab.free_list.pop() {
-            return ptr as *mut c_void;
-        }
-    } else if size <= MEDIUM_MAX {
-        let idx = medium_index(size);
-        let bucket_size = medium_bucket_size(idx);
-        {
-            let mut bucket = POOL.medium_free[idx].lock();
-            if let Some(ptr) = bucket.pop() {
-                stats::add_memory_saved(bucket_size.saturating_sub(size));
-                return ptr as *mut c_void;
-            }
-        }
-    }
-
-    // 大块或无空闲：直接 mmap
-    let ptr = mmap(
-        std::ptr::null_mut(),
-        size + std::mem::size_of::<usize>(),
-        PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS,
-        -1,
-        0,
+    let s = POOL.stats();
+    eprintln!(
+        "[php-safe-core] MemPool ready: {} tiers, {} slots/tier pre-allocated",
+        s.tiers.len(), SLAB_CAPACITY
     );
-    if ptr == MAP_FAILED {
-        return std::ptr::null_mut();
-    }
-    // 在头部存储 size，供 free 使用
-    *(ptr as *mut usize) = size;
-    (ptr as *mut u8).add(std::mem::size_of::<usize>()) as *mut c_void
-}
-
-/// 释放内存（归还池或 munmap）
-pub unsafe fn dealloc(ptr: *mut c_void) {
-    if ptr.is_null() {
-        return;
-    }
-
-    // 尝试从头部读取 size（大块路径）
-    let header_ptr = (ptr as *mut u8).sub(std::mem::size_of::<usize>());
-    let stored_size = *(header_ptr as *mut usize);
-
-    if stored_size > MEDIUM_MAX {
-        munmap(header_ptr as *mut c_void, stored_size + std::mem::size_of::<usize>());
-        return;
-    }
-
-    if stored_size <= SMALL_MAX && stored_size > 0 {
-        let idx = (stored_size.saturating_sub(1)) / 8;
-        let mut slab = POOL.slabs[idx].lock();
-        slab.free_list.push(ptr as *mut u8);
-        return;
-    }
-
-    if stored_size <= MEDIUM_MAX && stored_size > SMALL_MAX {
-        let idx = medium_index(stored_size);
-        let mut bucket = POOL.medium_free[idx].lock();
-        bucket.push(ptr as *mut u8);
-        return;
-    }
-
-    // 降级：使用系统 free
-    libc_free(ptr);
-}
-
-/// realloc 实现
-pub unsafe fn realloc(ptr: *mut c_void, size: size_t) -> *mut c_void {
-    if ptr.is_null() {
-        return alloc(size);
-    }
-    if size == 0 {
-        dealloc(ptr);
-        return std::ptr::null_mut();
-    }
-    let new_ptr = alloc(size);
-    if !new_ptr.is_null() {
-        // 保守 copy：复制 size 字节
-        std::ptr::copy_nonoverlapping(ptr as *const u8, new_ptr as *mut u8, size);
-        dealloc(ptr);
-    }
-    new_ptr
-}
-
-fn medium_index(size: usize) -> usize {
-    match size {
-        0..=128 => 0,
-        129..=256 => 1,
-        257..=512 => 2,
-        513..=1024 => 3,
-        1025..=2048 => 4,
-        2049..=4096 => 5,
-        _ => 6,
-    }
-}
-
-fn medium_bucket_size(idx: usize) -> usize {
-    [128, 256, 512, 1024, 2048, 4096, 8192][idx.min(6)]
-}
-
-unsafe fn libc_free(ptr: *mut c_void) {
-    // 直接调用真正的 free（通过 dlsym 或 #[link] 绕过）
-    extern "C" {
-        fn free(ptr: *mut c_void);
-    }
-    free(ptr)
 }

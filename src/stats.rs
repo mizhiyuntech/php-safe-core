@@ -22,16 +22,22 @@ pub fn inc_rate_block()   { RATE_BLOCKS.fetch_add(1, Ordering::Relaxed); }
 
 pub fn get() -> Stats {
     Stats {
-        rc_intercepts:  RC_INTERCEPTS.load(Ordering::Relaxed),
+        rc_intercepts:   RC_INTERCEPTS.load(Ordering::Relaxed),
         threats_blocked: THREATS_BLOCKED.load(Ordering::Relaxed),
-        rate_blocks:    RATE_BLOCKS.load(Ordering::Relaxed),
+        rate_blocks:     RATE_BLOCKS.load(Ordering::Relaxed),
     }
 }
 
 pub fn to_json() -> String {
     let s = get();
+    let (total, hits, sys) = crate::allocator::stats();
     format!(
-        r#"{{"rc_intercepts":{},"threats_blocked":{},"rate_blocks":{}}}"#,
-        s.rc_intercepts, s.threats_blocked, s.rate_blocks
+        r#"{{"rc_intercepts":{},"threats_blocked":{},"rate_blocks":{},"tampered_files":{},"upload_blocked":{},"alloc_total":{},"alloc_hits":{},"alloc_sys":{}}}"#,
+        s.rc_intercepts,
+        s.threats_blocked,
+        s.rate_blocks,
+        crate::edge_guard::tamper_count(),
+        crate::upload_guard::blocked_count(),
+        total, hits, sys,
     )
 }
