@@ -1,5 +1,3 @@
-//! PHP Safe Core - PHP底层安全处理器
-
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 
@@ -13,36 +11,36 @@ mod sensitive_guard;
 
 use libc::{c_void, size_t, c_char, c_int};
 
-const BANNER: &str = r#"
-    _~^~^~_
-\) /  o o  \ (/      php-safe-core v0.2.0
-  '_   ¬   _'        ✦ RC 防护已激活
-  / '-----' \        ✦ 命令注入拦截已激活
-                     ✦ 文件访问监控已激活
-  🦀 Powered by      ✦ 频率限制已激活
-     Rust            ✦ 敏感信息保护已激活
-"#;
+// 中文字符串用普通 &str，不用 b"" 字节串，编译器支持 UTF-8
+const BANNER: &str = "\n\
+    _~^~^~_\n\
+\\) /  o o  \\ (/      php-safe-core v0.2.0\n\
+  '_   -   _'        \u{2726} RC \u9632\u62a4\u5df2\u6fc0\u6d3b\n\
+  / '-----' \\        \u{2726} \u547d\u4ee4\u6ce8\u5165\u62e6\u622a\u5df2\u6fc0\u6d3b\n\
+                     \u{2726} \u6587\u4ef6\u8bbf\u95ee\u76d1\u63a7\u5df2\u6fc0\u6d3b\n\
+  \u{1f980} Powered by      \u{2726} \u9891\u7387\u9650\u5236\u5df2\u6fc0\u6d3b\n\
+     Rust            \u{2726} \u654f\u611f\u4fe1\u606f\u4fdd\u62a4\u5df2\u6fc0\u6d3b\n";
 
 #[no_mangle]
 pub extern "C" fn php_safe_core_init() {
     stats::init();
     rate_limiter::init();
     eprintln!("{}", BANNER);
-    eprintln!("[php-safe-core] ✅ 安全处理器启动成功 | PHP 进程已受保护");
-    eprintln!("[php-safe-core] ─────────────────────────────────────────");
+    eprintln!("[php-safe-core] \u{2705} \u5b89\u5168\u5904\u7406\u5668\u542f\u52a8\u6210\u529f | PHP \u8fdb\u7a0b\u5df2\u53d7\u4fdd\u62a4");
+    eprintln!("[php-safe-core] {}", "\u2500".repeat(41));
 }
 
 #[no_mangle]
 pub extern "C" fn php_safe_core_shutdown() {
     let s = stats::get();
-    eprintln!("[php-safe-core] ─────────────────────────────────────────");
-    eprintln!("[php-safe-core] 📊 运行统计:");
-    eprintln!("[php-safe-core]   RC 拦截     : {}", s.rc_intercepts);
-    eprintln!("[php-safe-core]   命令拦截    : {}", s.cmd_blocks);
-    eprintln!("[php-safe-core]   文件拦截    : {}", s.file_blocks);
-    eprintln!("[php-safe-core]   频率拦截    : {}", s.rate_blocks);
-    eprintln!("[php-safe-core]   敏感拦截    : {}", s.sensitive_blocks);
-    eprintln!("[php-safe-core] 🦀 已安全退出");
+    eprintln!("[php-safe-core] {}", "\u2500".repeat(41));
+    eprintln!("[php-safe-core] \u{1f4ca} \u8fd0\u884c\u7edf\u8ba1:");
+    eprintln!("[php-safe-core]   RC \u62e6\u622a     : {}", s.rc_intercepts);
+    eprintln!("[php-safe-core]   \u547d\u4ee4\u62e6\u622a    : {}", s.cmd_blocks);
+    eprintln!("[php-safe-core]   \u6587\u4ef6\u62e6\u622a    : {}", s.file_blocks);
+    eprintln!("[php-safe-core]   \u9891\u7387\u62e6\u622a    : {}", s.rate_blocks);
+    eprintln!("[php-safe-core]   \u654f\u611f\u62e6\u622a    : {}", s.sensitive_blocks);
+    eprintln!("[php-safe-core] \u{1f980} \u5df2\u5b89\u5168\u9000\u51fa");
 }
 
 #[no_mangle]
