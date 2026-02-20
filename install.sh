@@ -1,8 +1,8 @@
 #!/bin/bash
 # ============================================================
-# php-safe-core 安装脚本
-# 用法：chmod +x install.sh && ./install.sh
-# 注意：仅建议在测试环境使用，生产环境请充分验证后再部署
+# php-safe-core installer
+# Usage: chmod +x install.sh && sudo ./install.sh
+# WARNING: Test environment only.
 # ============================================================
 
 set -e
@@ -20,141 +20,178 @@ BACKUP_SUFFIX=".bak.$(date +%Y%m%d%H%M%S)"
 
 echo -e "${CYAN}"
 echo "=================================================="
-echo "   php-safe-core 安装脚本"
+echo "   php-safe-core installer"
 echo "=================================================="
 echo -e "${NC}"
 
-# ── 警告提示 ──────────────────────────────────────────
-echo -e "${YELLOW}⚠  警告：本工具建议仅在【测试环境】使用。${NC}"
-echo -e "${YELLOW}   生产环境部署前请确保已充分验证，以防项目崩溃。${NC}"
+echo -e "${YELLOW}[WARNING] For TEST environment only.${NC}"
+echo -e "${YELLOW}          Do NOT deploy to production without verification.${NC}"
 echo ""
-read -rp "确认继续安装？(输入 yes 继续，其他任意键退出): " CONFIRM
-if [ "$CONFIRM" != "yes" ]; then
-    echo "已取消安装。"
+echo "Continue? (type y or yes to proceed)"
+printf "> "
+read -r CONFIRM
+echo ""
+CONFIRM=$(printf '%s' "$CONFIRM" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' | tr -d '\r\n')
+if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "yes" ]; then
+    echo "Installation cancelled."
     exit 0
 fi
-echo ""
 
-# ── 检查 root 权限 ────────────────────────────────────
+# ── Root check ─────────────────────────────────────────────
 if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}✗ 请以 root 权限运行本脚本（sudo ./install.sh）${NC}"
+    echo -e "${RED}[ERROR] Please run as root: sudo ./install.sh${NC}"
     exit 1
 fi
 
-# ── 检查 .so 文件是否存在 ─────────────────────────────
+# ── Check .so file ─────────────────────────────────────────
 if [ ! -f "$SO_NAME" ]; then
-    echo -e "${RED}✗ 未找到 $SO_NAME，请将 .so 文件与本脚本放在同一目录下。${NC}"
+    echo -e "${RED}[ERROR] $SO_NAME not found in current directory.${NC}"
     exit 1
 fi
-echo -e "${GREEN}✔ 找到 $SO_NAME${NC}"
+echo -e "${GREEN}[OK] Found $SO_NAME${NC}"
 
-# ── 检查 PHP 是否安装 ─────────────────────────────────
+# ── Check PHP ──────────────────────────────────────────────
 if ! command -v php &>/dev/null; then
-    echo -e "${RED}✗ 未检测到 PHP，请先安装 PHP 后再运行本脚本。${NC}"
+    echo -e "${RED}[ERROR] PHP not found.${NC}"
     exit 1
 fi
+PHP_BIN=$(command -v php)
 PHP_VERSION=$(php -r 'echo PHP_VERSION;')
-echo -e "${GREEN}✔ 检测到 PHP 版本：$PHP_VERSION${NC}"
+echo -e "${GREEN}[OK] PHP $PHP_VERSION ($PHP_BIN)${NC}"
 
-# ── 复制 .so 到系统目录 ───────────────────────────────
+# ── Install .so ────────────────────────────────────────────
 echo ""
-echo -e "${CYAN}► 正在安装 $SO_NAME 到 $INSTALL_DIR ...${NC}"
-
-# 若旧版本存在则备份
+echo -e "${CYAN}[*] Installing $SO_NAME ...${NC}"
+mkdir -p "$INSTALL_DIR"
 if [ -f "$SO_TARGET" ]; then
     cp "$SO_TARGET" "${SO_TARGET}${BACKUP_SUFFIX}"
-    echo -e "${YELLOW}  已备份旧版本 → ${SO_TARGET}${BACKUP_SUFFIX}${NC}"
+    echo -e "${YELLOW}[INFO] Old version backed up: ${SO_TARGET}${BACKUP_SUFFIX}${NC}"
 fi
-
 cp "$SO_NAME" "$SO_TARGET"
 chmod 755 "$SO_TARGET"
-echo -e "${GREEN}✔ $SO_NAME 已安装至 $SO_TARGET${NC}"
+ldconfig 2>/dev/null || true
+echo -e "${GREEN}[OK] Installed: $SO_TARGET${NC}"
 
-# ── 刷新动态库缓存 ────────────────────────────────────
-ldconfig
-echo -e "${GREEN}✔ ldconfig 缓存已刷新${NC}"
-
-# ── 检测 PHP 运行模式并注入 LD_PRELOAD ───────────────
+# ── Verify .so loads with PHP ──────────────────────────────
 echo ""
-echo -e "${CYAN}► 正在检测 PHP 运行模式并注入 LD_PRELOAD ...${NC}"
-
-INJECTED=0
-
-# PHP-FPM
-FPM_CONF=$(find /etc/php* /etc/php-fpm* /usr/local/etc/php* -name "www.conf" 2>/dev/null | head -1)
-if [ -n "$FPM_CONF" ]; then
-    if grep -q "LD_PRELOAD" "$FPM_CONF"; then
-        sed -i "s|.*env\[LD_PRELOAD\].*|env[LD_PRELOAD] = $SO_TARGET|" "$FPM_CONF"
-        echo -e "${GREEN}✔ 已更新 PHP-FPM 配置：$FPM_CONF${NC}"
-    else
-        echo "" >> "$FPM_CONF"
-        echo "env[LD_PRELOAD] = $SO_TARGET" >> "$FPM_CONF"
-        echo -e "${GREEN}✔ 已写入 PHP-FPM 配置：$FPM_CONF${NC}"
-    fi
-    INJECTED=1
-
-    # 重启 PHP-FPM
-    if command -v systemctl &>/dev/null; then
-        FPM_SERVICE=$(systemctl list-units --type=service --no-pager 2>/dev/null | grep -oE 'php[0-9.]*-fpm' | head -1)
-        if [ -n "$FPM_SERVICE" ]; then
-            systemctl restart "$FPM_SERVICE" && \
-                echo -e "${GREEN}✔ 已重启 $FPM_SERVICE${NC}" || \
-                echo -e "${YELLOW}⚠ 重启 $FPM_SERVICE 失败，请手动重启${NC}"
-        fi
-    fi
-fi
-
-# Apache mod_php
-APACHE_ENVVARS=$(find /etc/apache2 /etc/httpd -name "envvars" 2>/dev/null | head -1)
-if [ -n "$APACHE_ENVVARS" ]; then
-    if grep -q "LD_PRELOAD" "$APACHE_ENVVARS"; then
-        sed -i "s|.*LD_PRELOAD.*|export LD_PRELOAD=$SO_TARGET|" "$APACHE_ENVVARS"
-    else
-        echo "export LD_PRELOAD=$SO_TARGET" >> "$APACHE_ENVVARS"
-    fi
-    echo -e "${GREEN}✔ 已写入 Apache envvars：$APACHE_ENVVARS${NC}"
-    INJECTED=1
-
-    if command -v systemctl &>/dev/null && systemctl is-active apache2 &>/dev/null; then
-        systemctl restart apache2 && \
-            echo -e "${GREEN}✔ 已重启 Apache${NC}" || \
-            echo -e "${YELLOW}⚠ 重启 Apache 失败，请手动重启${NC}"
-    elif command -v systemctl &>/dev/null && systemctl is-active httpd &>/dev/null; then
-        systemctl restart httpd && \
-            echo -e "${GREEN}✔ 已重启 httpd${NC}" || \
-            echo -e "${YELLOW}⚠ 重启 httpd 失败，请手动重启${NC}"
-    fi
-fi
-
-# 未检测到任何已知运行模式
-if [ "$INJECTED" -eq 0 ]; then
-    echo -e "${YELLOW}⚠ 未自动检测到 PHP-FPM 或 Apache 配置文件。${NC}"
-    echo -e "  请手动将以下内容添加到你的服务配置中：${NC}"
-    echo ""
-    echo -e "  ${CYAN}LD_PRELOAD=$SO_TARGET${NC}"
-    echo ""
-fi
-
-# ── 验证加载 ──────────────────────────────────────────
-echo ""
-echo -e "${CYAN}► 验证 .so 可正常被 PHP 加载 ...${NC}"
-LOAD_TEST=$(LD_PRELOAD="$SO_TARGET" php -r 'echo "ok";' 2>&1)
-if echo "$LOAD_TEST" | grep -q "ok"; then
-    echo -e "${GREEN}✔ 验证通过，PHP 可正常加载 $SO_NAME${NC}"
+echo -e "${CYAN}[*] Verifying .so loads correctly ...${NC}"
+LOAD_TEST=$(LD_PRELOAD="$SO_TARGET" php -r 'echo "php-safe-core-ok";' 2>&1)
+if echo "$LOAD_TEST" | grep -q "php-safe-core-ok"; then
+    echo -e "${GREEN}[OK] .so verified: PHP loads it successfully.${NC}"
+    VERIFIED=1
 else
-    echo -e "${RED}✗ 验证失败，输出如下：${NC}"
+    echo -e "${RED}[FAIL] .so failed to load. Output:${NC}"
     echo "$LOAD_TEST"
-    echo -e "${YELLOW}  建议检查 .so 架构是否与服务器匹配（x86_64 / aarch64）${NC}"
+    echo -e "${YELLOW}[HINT] Architecture mismatch? Use x86_64 .so for x86_64, aarch64 for ARM.${NC}"
+    VERIFIED=0
 fi
 
-# ── 完成 ──────────────────────────────────────────────
+# ── Inject LD_PRELOAD globally ─────────────────────────────
 echo ""
-echo -e "${GREEN}=================================================="
-echo "   安装完成！"
+echo -e "${CYAN}[*] Injecting LD_PRELOAD into system environment ...${NC}"
+
+# /etc/environment (covers most panel environments including AcePanel)
+ENV_FILE="/etc/environment"
+if grep -q "LD_PRELOAD" "$ENV_FILE" 2>/dev/null; then
+    sed -i "s|.*LD_PRELOAD.*|LD_PRELOAD=$SO_TARGET|" "$ENV_FILE"
+    echo -e "${GREEN}[OK] Updated LD_PRELOAD in $ENV_FILE${NC}"
+else
+    echo "LD_PRELOAD=$SO_TARGET" >> "$ENV_FILE"
+    echo -e "${GREEN}[OK] Added LD_PRELOAD to $ENV_FILE${NC}"
+fi
+
+# /etc/profile.d/ (shell login)
+PROFILE_FILE="/etc/profile.d/php-safe-core.sh"
+echo "export LD_PRELOAD=$SO_TARGET" > "$PROFILE_FILE"
+chmod 644 "$PROFILE_FILE"
+echo -e "${GREEN}[OK] Added $PROFILE_FILE${NC}"
+
+# ── Auto-detect and restart PHP service ───────────────────
+echo ""
+echo -e "${CYAN}[*] Detecting and restarting PHP service ...${NC}"
+
+RESTARTED=0
+
+# Search all possible PHP-FPM service names
+if command -v systemctl &>/dev/null; then
+    PHP_SERVICES=$(systemctl list-units --type=service --no-pager 2>/dev/null \
+        | grep -oE 'php[0-9.]*[-_]fpm[^ ]*' | sed 's/\.service//' | sort -u)
+
+    for SVC in $PHP_SERVICES; do
+        if systemctl is-active "$SVC" &>/dev/null; then
+            # Inject into the drop-in override
+            OVERRIDE_DIR="/etc/systemd/system/${SVC}.service.d"
+            mkdir -p "$OVERRIDE_DIR"
+            cat > "$OVERRIDE_DIR/php-safe-core.conf" << EOF
+[Service]
+Environment="LD_PRELOAD=$SO_TARGET"
+EOF
+            systemctl daemon-reload
+            systemctl restart "$SVC" && {
+                echo -e "${GREEN}[OK] Restarted $SVC with LD_PRELOAD injected.${NC}"
+                RESTARTED=1
+            } || echo -e "${YELLOW}[WARN] Failed to restart $SVC.${NC}"
+        fi
+    done
+fi
+
+# Fallback: search by process name
+if [ "$RESTARTED" -eq 0 ]; then
+    for PROC in php-fpm php-fpm8 php-fpm7 php8.3-fpm php8.2-fpm php8.1-fpm php7.4-fpm; do
+        if pgrep -x "$PROC" &>/dev/null; then
+            pkill -x "$PROC" 2>/dev/null || true
+            sleep 1
+            if command -v "$PROC" &>/dev/null; then
+                "$PROC" &
+                echo -e "${GREEN}[OK] Restarted $PROC.${NC}"
+                RESTARTED=1
+                break
+            fi
+        fi
+    done
+fi
+
+# Restart Apache if running
+for APACHE in apache2 httpd; do
+    if command -v systemctl &>/dev/null && systemctl is-active "$APACHE" &>/dev/null; then
+        OVERRIDE_DIR="/etc/systemd/system/${APACHE}.service.d"
+        mkdir -p "$OVERRIDE_DIR"
+        cat > "$OVERRIDE_DIR/php-safe-core.conf" << EOF
+[Service]
+Environment="LD_PRELOAD=$SO_TARGET"
+EOF
+        systemctl daemon-reload
+        systemctl restart "$APACHE" && {
+            echo -e "${GREEN}[OK] Restarted $APACHE.${NC}"
+            RESTARTED=1
+        } || true
+    fi
+done
+
+if [ "$RESTARTED" -eq 0 ]; then
+    echo -e "${YELLOW}[INFO] No running PHP service found to restart automatically.${NC}"
+    echo -e "${YELLOW}       If you use a panel (e.g. AcePanel), please restart PHP from the panel.${NC}"
+fi
+
+# ── Summary ────────────────────────────────────────────────
+echo ""
+echo -e "${CYAN}=================================================="
+echo "   Installation Summary"
 echo "=================================================="
 echo -e "${NC}"
-echo "  .so 路径  : $SO_TARGET"
-echo "  PHP 版本  : $PHP_VERSION"
+echo "  .so path  : $SO_TARGET"
+echo "  PHP ver   : $PHP_VERSION"
+if [ "$VERIFIED" -eq 1 ]; then
+    echo -e "  .so test  : ${GREEN}PASSED${NC}"
+else
+    echo -e "  .so test  : ${RED}FAILED - check architecture${NC}"
+fi
+if [ "$RESTARTED" -eq 1 ]; then
+    echo -e "  PHP svc   : ${GREEN}Restarted successfully${NC}"
+else
+    echo -e "  PHP svc   : ${YELLOW}Please restart manually from your panel${NC}"
+fi
 echo ""
-echo -e "${YELLOW}  如需卸载，删除 $SO_TARGET 并移除 LD_PRELOAD 配置后重启服务即可。${NC}"
+echo -e "${YELLOW}To uninstall: rm $SO_TARGET $PROFILE_FILE"
+echo -e "  Remove LD_PRELOAD from $ENV_FILE and restart PHP.${NC}"
 echo ""
