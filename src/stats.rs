@@ -1,48 +1,49 @@
-//! 统计模块：记录运行时指标
+//! 统计模块
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use once_cell::sync::Lazy;
 
 static RC_INTERCEPTS: AtomicU64 = AtomicU64::new(0);
-static MEMORY_SAVED: AtomicU64 = AtomicU64::new(0);
-static REQUESTS_HANDLED: AtomicU64 = AtomicU64::new(0);
+static CMD_BLOCKS: AtomicU64 = AtomicU64::new(0);
+static FILE_BLOCKS: AtomicU64 = AtomicU64::new(0);
+static RATE_BLOCKS: AtomicU64 = AtomicU64::new(0);
+static SENSITIVE_BLOCKS: AtomicU64 = AtomicU64::new(0);
 
 pub struct Stats {
     pub rc_intercepts: u64,
-    pub memory_saved: u64,
-    pub requests_handled: u64,
+    pub cmd_blocks: u64,
+    pub file_blocks: u64,
+    pub rate_blocks: u64,
+    pub sensitive_blocks: u64,
 }
 
 pub fn init() {
     RC_INTERCEPTS.store(0, Ordering::Relaxed);
-    MEMORY_SAVED.store(0, Ordering::Relaxed);
-    REQUESTS_HANDLED.store(0, Ordering::Relaxed);
+    CMD_BLOCKS.store(0, Ordering::Relaxed);
+    FILE_BLOCKS.store(0, Ordering::Relaxed);
+    RATE_BLOCKS.store(0, Ordering::Relaxed);
+    SENSITIVE_BLOCKS.store(0, Ordering::Relaxed);
 }
 
-pub fn inc_rc_intercept() {
-    RC_INTERCEPTS.fetch_add(1, Ordering::Relaxed);
-}
-
-pub fn add_memory_saved(bytes: usize) {
-    MEMORY_SAVED.fetch_add(bytes as u64, Ordering::Relaxed);
-}
-
-pub fn inc_request() {
-    REQUESTS_HANDLED.fetch_add(1, Ordering::Relaxed);
-}
+pub fn inc_rc_intercept()    { RC_INTERCEPTS.fetch_add(1, Ordering::Relaxed); }
+pub fn inc_cmd_block()       { CMD_BLOCKS.fetch_add(1, Ordering::Relaxed); }
+pub fn inc_file_block()      { FILE_BLOCKS.fetch_add(1, Ordering::Relaxed); }
+pub fn inc_rate_block()      { RATE_BLOCKS.fetch_add(1, Ordering::Relaxed); }
+pub fn inc_sensitive_block() { SENSITIVE_BLOCKS.fetch_add(1, Ordering::Relaxed); }
 
 pub fn get() -> Stats {
     Stats {
-        rc_intercepts: RC_INTERCEPTS.load(Ordering::Relaxed),
-        memory_saved: MEMORY_SAVED.load(Ordering::Relaxed),
-        requests_handled: REQUESTS_HANDLED.load(Ordering::Relaxed),
+        rc_intercepts:    RC_INTERCEPTS.load(Ordering::Relaxed),
+        cmd_blocks:       CMD_BLOCKS.load(Ordering::Relaxed),
+        file_blocks:      FILE_BLOCKS.load(Ordering::Relaxed),
+        rate_blocks:      RATE_BLOCKS.load(Ordering::Relaxed),
+        sensitive_blocks: SENSITIVE_BLOCKS.load(Ordering::Relaxed),
     }
 }
 
 pub fn to_json() -> String {
     let s = get();
     format!(
-        r#"{{"rc_intercepts":{},"memory_saved_bytes":{},"requests_handled":{}}}"#,
-        s.rc_intercepts, s.memory_saved, s.requests_handled
+        r#"{{"rc_intercepts":{},"cmd_blocks":{},"file_blocks":{},"rate_blocks":{},"sensitive_blocks":{}}}"#,
+        s.rc_intercepts, s.cmd_blocks, s.file_blocks, s.rate_blocks, s.sensitive_blocks
     )
 }

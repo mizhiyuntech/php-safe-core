@@ -1,8 +1,8 @@
 [package]
 name = "php-safe-core"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
-description = "PHP底层安全处理器 - 修复RC漏洞"
+description = "PHP底层安全处理器 - RC防护/命令拦截/文件监控/频率限制/敏感信息保护"
 license = "MIT"
 
 [lib]
